@@ -154,202 +154,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Boss AI for DM-spawned bosses.
-//
-// Boss creatures are pulled from the dungeon-boss pool (ScriptName != ''),
-// but their native C++ AI depends on their home dungeon's InstanceScript and
-// will silently fail when spawned in a foreign instance.  This custom AI
-// gives every boss a themed combat rotation so they actually use abilities.
-//
-// Spell damage is already scaled by dm_unit_script based on the session's
-// effective level, so raw spell values don't need to match the party level.
-// ---------------------------------------------------------------------------
-class DungeonMasterBossAI : public CreatureAI
-{
-public:
-    explicit DungeonMasterBossAI(Creature* creature)
-        : CreatureAI(creature), _enraged(false)
-    {
-        // Pick a themed spell kit based on the creature type
-        uint32 cType = me->GetCreatureTemplate()->type;
-        switch (cType)
-        {
-            case CREATURE_TYPE_DRAGONKIN:
-                // Flame Breath (frontal cone) + Tail Sweep + Wing Buffet
-                _spells = {
-                    { 9573,  8000, 12000, false },   // Flame Breath  (cone)
-                    { 15847, 15000, 20000, false },   // Tail Sweep    (PBAoE)
-                    { 18500, 20000, 28000, false },   // Wing Buffet   (knockback)
-                };
-                break;
-            case CREATURE_TYPE_DEMON:
-                // Shadow Bolt Volley + Rain of Fire (small) + Fear
-                _spells = {
-                    { 17228, 6000,  10000, false },   // Shadow Bolt Volley
-                    { 19717, 18000, 25000, false },   // Rain of Fire
-                    { 12542, 22000, 30000, false },   // Fear (single target)
-                };
-                break;
-            case CREATURE_TYPE_UNDEAD:
-                // Shadow Bolt + Curse of Agony + Shadow Nova
-                _spells = {
-                    { 15232, 5000,  8000,  false },   // Shadow Bolt
-                    { 14868, 14000, 20000, false },   // Curse of Agony
-                    { 15398, 18000, 25000, true  },   // Shadow Nova (PBAoE)
-                };
-                break;
-            case CREATURE_TYPE_ELEMENTAL:
-                // Chain Lightning + Frost Nova + Shock
-                _spells = {
-                    { 12058, 6000,  10000, false },   // Chain Lightning
-                    { 15531, 16000, 22000, true  },   // Frost Nova (PBAoE)
-                    { 13281, 10000, 14000, false },   // Earth Shock
-                };
-                break;
-            case CREATURE_TYPE_BEAST:
-                // Frenzy + Charge + Rend
-                _spells = {
-                    { 8269,  15000, 22000, true  },   // Frenzy (self)
-                    { 22120, 12000, 18000, false },   // Charge
-                    { 16509, 8000,  12000, false },   // Rend (bleed)
-                };
-                break;
-            case CREATURE_TYPE_GIANT:
-                // Thunderclap + Knock Away + War Stomp
-                _spells = {
-                    { 8078,  8000,  12000, true  },   // Thunderclap (PBAoE slow)
-                    { 15580, 14000, 20000, false },   // Knock Away
-                    { 16727, 20000, 28000, true  },   // War Stomp (AoE stun)
-                };
-                break;
-            case CREATURE_TYPE_HUMANOID:
-            default:
-                // Cleave + Mortal Strike + Intimidating Shout
-                _spells = {
-                    { 15284, 6000,  10000, false },   // Cleave
-                    { 16856, 12000, 18000, false },   // Mortal Strike
-                    { 19134, 22000, 30000, true  },   // Frightening Shout (AoE)
-                };
-                break;
-        }
 
-        // Initialise cooldown timers
-        for (auto& s : _spells)
-            s.timer = RandInt<uint32>(s.cdMin / 2, s.cdMin);   // stagger first casts
-    }
-
-    // ---- Aggro (same logic as trash AI) ----
-    void MoveInLineOfSight(Unit* who) override
-    {
-        if (!who || !me->IsAlive() || me->IsInCombat() || me->HasReactState(REACT_PASSIVE))
-            return;
-        if (who->GetTypeId() != TYPEID_PLAYER) return;
-        Player* player = who->ToPlayer();
-        if (!player || !player->IsAlive() || player->IsGameMaster()) return;
-
-        float aggroRange = sDMConfig->GetAggroRadius();
-        if (me->IsWithinDistInMap(player, aggroRange)
-            && me->IsHostileTo(player)
-            && me->IsWithinLOSInMap(player))
-        {
-            me->SetInCombatWith(player);
-            player->SetInCombatWith(me);
-            me->AddThreat(player, 1.0f);
-            AttackStart(player);
-        }
-    }
-
-    void JustEngagedWith(Unit* /*who*/) override
-    {
-        // Reset all spell timers on pull
-        for (auto& s : _spells)
-            s.timer = RandInt<uint32>(s.cdMin / 2, s.cdMin);
-        _enraged = false;
-    }
-
-    void UpdateAI(uint32 diff) override
-    {
-        if (!UpdateVictim())
-        {
-            // Idle aggro scan (same as trash AI)
-            _aggroTimer += diff;
-            if (_aggroTimer >= 1000 && me->IsAlive())
-            {
-                _aggroTimer = 0;
-                float aggroRange = sDMConfig->GetAggroRadius();
-                Map::PlayerList const& players = me->GetMap()->GetPlayers();
-                float closest = aggroRange;
-                Player* target = nullptr;
-                for (auto const& itr : players)
-                {
-                    Player* p = itr.GetSource();
-                    if (!p || !p->IsAlive() || p->IsGameMaster()) continue;
-                    float dist = me->GetDistance(p);
-                    if (dist < closest && me->IsHostileTo(p) && me->IsWithinLOSInMap(p))
-                    { closest = dist; target = p; }
-                }
-                if (target)
-                {
-                    me->SetInCombatWith(target);
-                    target->SetInCombatWith(me);
-                    me->AddThreat(target, 1.0f);
-                    AttackStart(target);
-                }
-            }
-            return;
-        }
-
-        // Enrage at 30% HP (once per fight)
-        if (!_enraged && me->HealthBelowPct(30))
-        {
-            _enraged = true;
-            me->CastSpell(me, 8599, true);   // Enrage (+40% damage, visual)
-        }
-
-        // Spell rotation
-        for (auto& s : _spells)
-        {
-            if (s.timer <= diff)
-            {
-                Unit* castTarget = s.pbAoE ? me : me->GetVictim();
-                if (castTarget)
-                    me->CastSpell(castTarget, s.spellId, false);
-                s.timer = RandInt<uint32>(s.cdMin, s.cdMax);
-            }
-            else
-                s.timer -= diff;
-        }
-
-        DoMeleeAttackIfReady();
-    }
-
-    void EnterEvadeMode(EvadeReason /*why*/) override
-    {
-        _enraged = false;
-        CreatureAI::EnterEvadeMode();
-    }
-
-    void JustDied(Unit* killer) override
-    {
-        CreatureAI::JustDied(killer);
-        // Same note as trash: do NOT fill loot here — handled by OnUnitDeath hook.
-        sDungeonMasterMgr->OnCreatureDeathHook(me);
-    }
-
-private:
-    struct SpellEntry
-    {
-        uint32 spellId;
-        uint32 cdMin;       // min cooldown ms
-        uint32 cdMax;       // max cooldown ms
-        bool   pbAoE;       // true = cast on self (PBAoE), false = cast on victim
-        uint32 timer = 0;   // current countdown
-    };
-
-    std::vector<SpellEntry> _spells;
-    bool   _enraged;
-    uint32 _aggroTimer = 0;
-};
 
 // Session helper implementations (declared in DMTypes.h)
 uint32 Session::GetAlivePlayerCount() const
@@ -1407,17 +1212,10 @@ void DungeonMasterMgr::PopulateDungeon(Session* session, InstanceMap* map)
         }
 
         // --- Install custom AI ---
-        // Both trash and bosses get custom AI.  Boss creatures are pulled from
-        // the dungeon-boss pool (ScriptName != ''), but their native C++ AI
-        // depends on their home dungeon's InstanceScript (encounter states,
-        // phase tracking, add management) and will silently fail or crash
-        // when spawned in a foreign instance — leaving bosses with nothing
-        // but auto-attacks.  DungeonMasterBossAI gives every boss a themed
-        // spell rotation; spell damage is scaled by dm_unit_script.
-        if (isBoss)
-            c->SetAI(new DungeonMasterBossAI(c));
-        else
-            c->SetAI(new DungeonMasterCreatureAI(c));
+        // All spawned creatures (trash and bosses alike) use DungeonMasterCreatureAI,
+        // which handles aggro scanning, patrol movement, and death hooks.
+        // Bosses rely on auto-attack only — no scripted spell rotations.
+        c->SetAI(new DungeonMasterCreatureAI(c));
 
         // Force visibility refresh or client won't see the creature
         c->UpdateObjectVisibility(true);
@@ -1595,7 +1393,7 @@ void DungeonMasterMgr::PopulateDungeon(Session* session, InstanceMap* map)
         ++bossesSpawned;
 
         LOG_INFO("module", "DungeonMaster: Boss spawned — entry {}, name '{}', "
-            "AI: DungeonMasterBossAI, ReactState: {}, Level: {}",
+            "AI: DungeonMasterCreatureAI (auto-attack), ReactState: {}, Level: {}",
             b->GetEntry(), b->GetName(),
             static_cast<int>(b->GetReactState()),
             b->GetLevel());
