@@ -850,13 +850,13 @@ std::vector<SpawnPoint> DungeonMasterMgr::GetSpawnPointsForMap(uint32 mapId)
     char bq[512];
     snprintf(bq, sizeof(bq),
         "SELECT c.position_x, c.position_y, c.position_z, c.orientation, "
-        "ct.mechanic_immune_mask, ct.`rank`, ct.name "
+        "ct.CreatureImmunitiesId, ct.`rank`, ct.name "
         "FROM creature c "
         "JOIN creature_template ct ON c.id1 = ct.entry "
         "WHERE c.map = %u "
-        "AND ct.mechanic_immune_mask > 0 "
+        "AND ct.CreatureImmunitiesId > 0 "
         "AND ct.`rank` >= 1 "
-        "ORDER BY ct.mechanic_immune_mask DESC",
+        "ORDER BY ct.CreatureImmunitiesId DESC",
         mapId);
     QueryResult bossResult = WorldDatabase.Query(bq);
 
