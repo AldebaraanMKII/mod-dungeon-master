@@ -4,6 +4,7 @@
  */
 
 #include "DungeonMasterMgr.h"
+#include "DMBossSpawnQuery.h"
 #include "RoguelikeMgr.h"
 #include "DMConfig.h"
 #include "Player.h"
@@ -847,18 +848,8 @@ std::vector<SpawnPoint> DungeonMasterMgr::GetSpawnPointsForMap(uint32 mapId)
     // Find boss positions from creature data
     bool bossFound = false;
 
-    char bq[512];
-    snprintf(bq, sizeof(bq),
-        "SELECT c.position_x, c.position_y, c.position_z, c.orientation, "
-        "ct.mechanic_immune_mask, ct.`rank`, ct.name "
-        "FROM creature c "
-        "JOIN creature_template ct ON c.id1 = ct.entry "
-        "WHERE c.map = %u "
-        "AND ct.mechanic_immune_mask > 0 "
-        "AND ct.`rank` >= 1 "
-        "ORDER BY ct.mechanic_immune_mask DESC",
-        mapId);
-    QueryResult bossResult = WorldDatabase.Query(bq);
+    std::string bossQuery = BuildBossSpawnPointQuery(mapId);
+    QueryResult bossResult = WorldDatabase.Query(bossQuery.c_str());
 
     if (bossResult)
     {
@@ -866,8 +857,8 @@ std::vector<SpawnPoint> DungeonMasterMgr::GetSpawnPointsForMap(uint32 mapId)
         struct BossCandidate {
             float x, y, z, o;
             float dist;
-            uint32 immuneMask;
-            std::string name;
+            uint64 mechanicsMask;
+            uint32 entry;
         };
         std::vector<BossCandidate> bosses;
 
@@ -879,8 +870,8 @@ std::vector<SpawnPoint> DungeonMasterMgr::GetSpawnPointsForMap(uint32 mapId)
             bc.y = f[1].Get<float>();
             bc.z = f[2].Get<float>();
             bc.o = f[3].Get<float>();
-            bc.immuneMask = f[4].Get<uint32>();
-            bc.name = f[6].Get<std::string>();
+            bc.mechanicsMask = f[4].Get<uint64>();
+            bc.entry = f[6].Get<uint32>();
 
             float dx = bc.x - ex, dy = bc.y - ey, dz = bc.z - ez;
             bc.dist = std::sqrt(dx*dx + dy*dy + dz*dz);
@@ -897,10 +888,10 @@ std::vector<SpawnPoint> DungeonMasterMgr::GetSpawnPointsForMap(uint32 mapId)
             const BossCandidate& lastBoss = bosses[0];
 
             LOG_INFO("module", "DungeonMaster: Map {} — found {} boss candidate(s). "
-                "Last boss: '{}' at ({:.1f}, {:.1f}, {:.1f}), immuneMask={}, dist={:.1f}",
-                mapId, bosses.size(), lastBoss.name,
+                "Last boss spawn entry {} at ({:.1f}, {:.1f}, {:.1f}), MechanicsMask={}, dist={:.1f}",
+                mapId, bosses.size(), lastBoss.entry,
                 lastBoss.x, lastBoss.y, lastBoss.z,
-                lastBoss.immuneMask, lastBoss.dist);
+                lastBoss.mechanicsMask, lastBoss.dist);
 
             // Create boss spawn point(s) at the actual boss location(s).
             uint32 bc = sDMConfig->GetBossCount();
@@ -963,10 +954,20 @@ void DungeonMasterMgr::ClearDungeonCreatures(InstanceMap* map)
     uint32 dbRemoved = 0;
 
     // Phase 2: despawn DB-spawned creatures
+    std::vector<Creature*> dbCreatures;
     auto const& store = map->GetCreatureBySpawnIdStore();
     for (auto const& pair : store)
     {
         Creature* c = pair.second;
+        if (c && c->IsInWorld() && !c->IsPet() && !c->IsGuardian()
+            && !c->IsTotem() && c->GetEntry() != npcEntry)
+        {
+            dbCreatures.push_back(c);
+        }
+    }
+
+    for (Creature* c : dbCreatures)
+    {
         if (c && c->IsInWorld() && !c->IsPet() && !c->IsGuardian()
             && !c->IsTotem() && c->GetEntry() != npcEntry)
         {
