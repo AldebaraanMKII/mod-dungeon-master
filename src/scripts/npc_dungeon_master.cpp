@@ -41,6 +41,10 @@ enum DMGossipActions
     GOSSIP_ACTION_SCALE_TIER    = 10004,
     GOSSIP_ACTION_LEADERBOARD   = 10005, // legacy — redirects to board menu
 
+    // Dungeon list pagination (free slots, outside the [300,10001) dungeon dispatch range)
+    GOSSIP_ACTION_DUNGEON_PREV_PAGE = 10006, // dungeon list - previous page
+    GOSSIP_ACTION_DUNGEON_NEXT_PAGE = 10007, // dungeon list - next page
+
     // Roguelike Mode
     GOSSIP_ACTION_ROGUELIKE_START       = 10010,
     GOSSIP_ACTION_ROGUELIKE_SCALE_PARTY = 10011,
@@ -66,6 +70,7 @@ struct PlayerDMSelection
     uint32 MapId         = 0;
     bool   ScaleToParty  = true;
     bool   IsRoguelike   = false;
+    uint32 DungeonPage   = 0;   // current page in the (paginated) dungeon menu
 };
 
 static std::unordered_map<ObjectGuid, PlayerDMSelection> sSelections;
@@ -188,7 +193,22 @@ public:
         }
         else if (action >= GOSSIP_ACTION_THEME_BASE && action < GOSSIP_ACTION_DUNGEON_BASE)
         {
-            { std::lock_guard<std::mutex> lk(sSelMutex); sSelections[player->GetGUID()].ThemeId = action - GOSSIP_ACTION_THEME_BASE; }
+            { std::lock_guard<std::mutex> lk(sSelMutex);
+              sSelections[player->GetGUID()].ThemeId     = action - GOSSIP_ACTION_THEME_BASE;
+              sSelections[player->GetGUID()].DungeonPage = 0; }
+            ShowDungeonMenu(player, creature);
+        }
+        else if (action == GOSSIP_ACTION_DUNGEON_PREV_PAGE)
+        {
+            { std::lock_guard<std::mutex> lk(sSelMutex);
+              auto& s = sSelections[player->GetGUID()];
+              if (s.DungeonPage > 0) --s.DungeonPage; }
+            ShowDungeonMenu(player, creature);
+        }
+        else if (action == GOSSIP_ACTION_DUNGEON_NEXT_PAGE)
+        {
+            { std::lock_guard<std::mutex> lk(sSelMutex);
+              ++sSelections[player->GetGUID()].DungeonPage; }
             ShowDungeonMenu(player, creature);
         }
         else if (action == GOSSIP_ACTION_DUNGEON_RANDOM)
@@ -360,22 +380,50 @@ private:
     {
         player->PlayerTalkClass->ClearMenus();
 
+        // Dungeons per page. Worst-case items rendered per page:
+        //   page 0:   Random(1) + DUNGEONS_PER_PAGE + Next(<=1) + Back(1)
+        //   page >0:  Prev(1)   + DUNGEONS_PER_PAGE + Next(<=1) + Back(1)
+        // With DUNGEONS_PER_PAGE = 24 the max is 27 <= GOSSIP_MAX_MENU_ITEMS(32).
+        static const uint32 DUNGEONS_PER_PAGE = 24;
+
         uint32 diffId;
+        uint32 page;
         { std::lock_guard<std::mutex> lk(sSelMutex);
           auto it = sSelections.find(player->GetGUID());
           if (it == sSelections.end()) { player->PlayerTalkClass->SendCloseGossip(); return; }
-          diffId = it->second.DifficultyId; }
+          diffId = it->second.DifficultyId;
+          page   = it->second.DungeonPage; }
 
         const DifficultyTier* diff = sDMConfig->GetDifficulty(diffId);
         if (!diff) { player->PlayerTalkClass->SendCloseGossip(); return; }
 
         auto dungeons = sDMConfig->GetDungeonsForLevel(diff->MinLevel, diff->MaxLevel);
 
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "|cFFFFD700Random Dungeon|r",
-            GOSSIP_SENDER_MAIN, GOSSIP_ACTION_DUNGEON_RANDOM);
-
-        for (const auto* dg : dungeons)
+        // Clamp page in case the dungeon list shrank or page ran past the end.
+        uint32 total      = static_cast<uint32>(dungeons.size());
+        uint32 totalPages = total ? ((total + DUNGEONS_PER_PAGE - 1) / DUNGEONS_PER_PAGE) : 1;
+        if (page >= totalPages)
         {
+            page = totalPages - 1;
+            std::lock_guard<std::mutex> lk(sSelMutex);
+            auto it = sSelections.find(player->GetGUID());
+            if (it != sSelections.end())
+                it->second.DungeonPage = page;
+        }
+
+        // "Random Dungeon" stays reachable: shown only on the first page.
+        if (page == 0)
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "|cFFFFD700Random Dungeon|r",
+                GOSSIP_SENDER_MAIN, GOSSIP_ACTION_DUNGEON_RANDOM);
+
+        // Render this page's slice of dungeons.
+        uint32 start = page * DUNGEONS_PER_PAGE;
+        uint32 end   = start + DUNGEONS_PER_PAGE;
+        if (end > total)
+            end = total;
+        for (uint32 i = start; i < end; ++i)
+        {
+            const DungeonInfo* dg = dungeons[i];
             char buf[128];
             snprintf(buf, sizeof(buf), "%s (Lv %u-%u)", dg->Name.c_str(), dg->MinLevel, dg->MaxLevel);
             AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, buf,
@@ -385,6 +433,14 @@ private:
         if (dungeons.empty())
             AddGossipItemFor(player, GOSSIP_ICON_CHAT,
                 "|cFF808080No dungeons available|r", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_CANCEL);
+
+        // Page navigation, rendered conditionally.
+        if (page > 0)
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "|cFF00FF00<< Previous Page|r",
+                GOSSIP_SENDER_MAIN, GOSSIP_ACTION_DUNGEON_PREV_PAGE);
+        if (end < total)
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "|cFF00FF00Next Page >>|r",
+                GOSSIP_SENDER_MAIN, GOSSIP_ACTION_DUNGEON_NEXT_PAGE);
 
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, "|cFFFF0000<< Back|r", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_CANCEL);
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
