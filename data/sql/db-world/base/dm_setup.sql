@@ -86,7 +86,7 @@ INSERT INTO `creature_template_model` (
 --
 
 INSERT INTO `creature` (
-    `guid`, `id1`, `map`, `spawnMask`, `phaseMask`,
+    `guid`, `id`, `map`, `spawnMask`, `phaseMask`,
     `position_x`, `position_y`, `position_z`, `orientation`,
     `spawntimesecs`
 ) VALUES
