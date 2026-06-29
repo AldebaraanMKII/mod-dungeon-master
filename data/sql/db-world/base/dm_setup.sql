@@ -19,7 +19,7 @@
 -- -----------------------------------------------
 -- Step 1: Clean slate  (safe DELETE, not TRUNCATE)
 -- -----------------------------------------------
-DELETE FROM `creature`               WHERE `id1` = 500000;
+DELETE FROM `creature`               WHERE `id` = 500000;
 DELETE FROM `creature_template_model` WHERE `CreatureID` = 500000;
 DELETE FROM `creature_template`      WHERE `entry` = 500000;
 
